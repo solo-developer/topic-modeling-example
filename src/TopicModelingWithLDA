@@ -1,0 +1,127 @@
+import pandas as pd
+import numpy as np
+import nltk
+import re
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+from sklearn.feature_extraction.text import CountVectorizer
+import matplotlib.pyplot as plt
+import seaborn as sns
+from wordcloud import WordCloud
+import gensim
+from gensim import corpora
+from gensim.models.coherencemodel import CoherenceModel
+import pyLDAvis.gensim_models
+import pyLDAvis
+from joblib import Parallel, delayed
+import multiprocessing
+
+# Ensure necessary NLTK resources are downloaded
+nltk.download('stopwords')
+nltk.download('wordnet')
+
+# Load the dataset from a CSV file and trim it down to a manageable sample size for initial testing
+file_path = 'demonetization-tweets.csv'  
+df = pd.read_csv(file_path, encoding='ISO-8859-1')
+df = df.sample(n=5000, random_state=42)  
+
+# Assume the tweets are in a column named 'text'
+tweets = df['text'].dropna().tolist()
+
+# Data Preprocessing Function
+def preprocess_text(text):
+    # Remove mentions, hashtags, URLs, and special characters
+    text = re.sub(r'@\w+|#\w+|http\S+|[^a-zA-Z\s]', '', text)
+    # Tokenize and lowercase
+    tokens = text.lower().split()
+    # Remove stop words
+    tokens = [word for word in tokens if word not in stopwords.words('english')]
+    # Lemmatization
+    lemmatizer = WordNetLemmatizer()
+    tokens = [lemmatizer.lemmatize(word) for word in tokens]
+    return ' '.join(tokens)
+
+# Apply preprocessing to each tweet
+cleaned_tweets = [preprocess_text(tweet) for tweet in tweets]
+
+# Create a Document-Term Matrix
+vectorizer = CountVectorizer(max_features=1000)
+X = vectorizer.fit_transform(cleaned_tweets)
+
+# Convert to DataFrame for visualization
+dtm_df = pd.DataFrame(X.toarray(), columns=vectorizer.get_feature_names_out())
+
+# Plotting the heatmap of the Document-Term Matrix
+plt.figure(figsize=(10, 8))
+sns.heatmap(dtm_df.T, cmap='viridis', cbar=True, linewidths=0.1)
+plt.title('Document-Term Matrix Heatmap')
+plt.xlabel('Documents')
+plt.ylabel('Terms')
+plt.show()
+
+# Create a dictionary and corpus needed for LDA
+tokenized_tweets = [tweet.split() for tweet in cleaned_tweets]
+dictionary = corpora.Dictionary(tokenized_tweets)
+corpus = [dictionary.doc2bow(tweet) for tweet in tokenized_tweets]
+
+# Train LDA model
+num_topics = 10  # Adjust the number of topics as needed
+lda_model = gensim.models.LdaModel(corpus=corpus,
+                                   id2word=dictionary,
+                                   num_topics=num_topics,
+                                   random_state=42,
+                                   update_every=1,
+                                   chunksize=100,
+                                   passes=50,  # Increased passes for better convergence
+                                   alpha='auto',
+                                   per_word_topics=True)
+
+# Evaluate the model using perplexity
+perplexity = lda_model.log_perplexity(corpus)
+print(f'Perplexity: {perplexity}')
+
+# Parallelize coherence calculation
+num_cores = multiprocessing.cpu_count()
+
+def calculate_coherence(metric):
+    try:
+        coherence_model = CoherenceModel(model=lda_model, texts=tokenized_tweets, dictionary=dictionary, coherence=metric)
+        coherence = coherence_model.get_coherence()
+        return coherence
+    except Exception as e:
+        print(f"Error during {metric} coherence calculation: {e}")
+        return None
+
+coherence_metrics = ['u_mass', 'c_v', 'c_uci', 'c_npmi']
+
+coherence_scores = Parallel(n_jobs=num_cores)(delayed(calculate_coherence)(metric) for metric in coherence_metrics)
+
+for metric, score in zip(coherence_metrics, coherence_scores):
+    if score is not None:
+        print(f'Coherence Score ({metric}): {score}')
+
+# Display topics with their top words
+def display_topics(model, num_topics, num_words):
+    for idx, topic in model.print_topics(num_topics=num_topics, num_words=num_words):
+        print(f'Topic {idx+1}: {topic}')
+
+display_topics(lda_model, num_topics, 10)
+
+# Visualization: Word Clouds for each topic
+for topic_idx in range(num_topics):
+    plt.figure()
+    wordcloud = WordCloud()
+    topic_words = dict(lda_model.show_topic(topic_idx, 50))
+    wordcloud.generate_from_frequencies(topic_words)
+    plt.imshow(wordcloud, interpolation='bilinear')
+    plt.axis("off")
+    plt.title(f'Topic {topic_idx + 1}')
+    plt.show()
+
+# pyLDAvis Visualization
+pyLDAvis.enable_notebook()
+vis = pyLDAvis.gensim_models.prepare(lda_model, corpus, dictionary)
+pyLDAvis.display(vis)
+
+#  Save the visualization to an HTML file
+pyLDAvis.save_html(vis, 'lda_topics.html')
